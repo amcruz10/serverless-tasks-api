@@ -137,10 +137,5 @@ portfolio project. One-time setup before this workflow will run:
 
 The full walkthrough for all of this is in the companion PDF guide.
 
-## Notes for a GovCloud variant
 
-If you want to mirror your day-job environment more closely, this same
-stack deploys to GovCloud with minimal changes: switch the region to a
-`us-gov-*` region, confirm your provider credentials target the GovCloud
-partition, and double check that any AWS services you add later (e.g. a
-Cognito user pool for auth) are available in GovCloud — not everything is.
+#I started with broad IAM permissions to get the project working, then iteratively scoped the policy down to only the specific actions and resources this project touches, verifying against real deploy errors rather than guessing.
