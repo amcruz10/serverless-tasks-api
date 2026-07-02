@@ -13,14 +13,14 @@ terraform {
   }
 
 
-  
-   backend "s3" {
-     bucket         = "tfstate-serverless-tasks-api-767397842736"
-     key            = "serverless-tasks-api/terraform.tfstate"
-     region         = "us-east-1"
-     dynamodb_table = "terraform-locks"
-     encrypt        = true
-   }
+
+  backend "s3" {
+    bucket         = "tfstate-serverless-tasks-api-767397842736"
+    key            = "serverless-tasks-api/terraform.tfstate"
+    region         = "us-east-1"
+    dynamodb_table = "terraform-locks"
+    encrypt        = true
+  }
 }
 
 provider "aws" {
