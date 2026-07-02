@@ -12,17 +12,15 @@ terraform {
     }
   }
 
-  # Uncomment and configure once you have an S3 bucket + DynamoDB lock table
-  # for remote state. Local state is fine for a portfolio project, but
-  # showing you know how to do this right is worth mentioning in interviews.
-  #
-  # backend "s3" {
-  #   bucket         = "your-tfstate-bucket"
-  #   key            = "serverless-tasks-api/terraform.tfstate"
-  #   region         = "us-east-1"
-  #   dynamodb_table = "terraform-locks"
-  #   encrypt        = true
-  # }
+
+  
+   backend "s3" {
+     bucket         = "tfstate-serverless-tasks-api-767397842736"
+     key            = "serverless-tasks-api/terraform.tfstate"
+     region         = "us-east-1"
+     dynamodb_table = "terraform-locks"
+     encrypt        = true
+   }
 }
 
 provider "aws" {
