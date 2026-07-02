@@ -1,9 +1,6 @@
-# Serverless Tasks API (Terraform + AWS Lambda + API Gateway + DynamoDB)
+# Serverless Tasks API
 
-A small serverless REST API, fully provisioned with Terraform. Built as a
-stand-in for the AWS Summit "Building Serverless Applications with Terraform"
-workshop, covering the same core skill: defining serverless infrastructure
-as code end to end.
+A serverless REST API for managing tasks, built on AWS Lambda, API Gateway, and DynamoDB, fully provisioned with Terraform. Deployment is automated through a GitHub Actions pipeline using OIDC federation for AWS authentication.
 
 ## Architecture
 
@@ -15,29 +12,53 @@ API Gateway (HTTP API)
   │  AWS_PROXY integration
   ▼
 Lambda (Python 3.12)
-  │  boto3, least-privilege IAM role
+  │  boto3
   ▼
-DynamoDB (pay-per-request, encrypted, PITR enabled)
+DynamoDB (pay-per-request, encrypted, point-in-time recovery enabled)
 ```
 
-- **API Gateway (HTTP API, not REST API)** — cheaper and simpler than the
-  older REST API type, sufficient for most serverless backends.
-- **Lambda** — single function, routed by `routeKey` (`GET /tasks`,
-  `POST /tasks`, etc.) rather than one function per route. Fine at this
-  scale; splitting into per-route functions is a reasonable next step if
-  you want to demonstrate finer-grained IAM scoping per operation.
-- **DynamoDB** — on-demand billing (no capacity planning), server-side
-  encryption on, point-in-time recovery on.
-- **IAM** — the Lambda execution role can only write to its own log group
-  and touch this one DynamoDB table. No `*` resources anywhere.
+- **API Gateway (HTTP API)** — routes requests to a single Lambda function based on method and path.
+- **Lambda** — one function handling all routes (`GET /tasks`, `GET /tasks/{id}`, `POST /tasks`, `PUT /tasks/{id}`, `DELETE /tasks/{id}`), dispatched by `routeKey`.
+- **DynamoDB** — on-demand billing, server-side encryption, point-in-time recovery.
+- **IAM** — the Lambda execution role is scoped to only its own log group and its one DynamoDB table.
 
 ## Prerequisites
 
 - Terraform >= 1.6
-- AWS CLI configured with credentials that can create IAM roles, Lambda
-  functions, API Gateway APIs, and DynamoDB tables
-- Python 3.12 (matches the Lambda runtime, not strictly required locally
-  since Terraform packages the zip for you)
+- AWS CLI
+- An AWS account with permissions to create the resources above (see **IAM and Access** below for how this project scopes that down)
+
+## Project structure
+
+```
+.
+├── main.tf                        # provider + backend config
+├── variables.tf
+├── outputs.tf
+├── dynamodb.tf
+├── iam.tf
+├── lambda.tf
+├── api_gateway.tf
+├── lambda/
+│   └── handler.py                 # CRUD handler
+└── .github/workflows/terraform.yml  # CI/CD pipeline
+```
+
+## State management
+
+Terraform state is stored remotely in S3 with DynamoDB-backed locking, rather than locally, so that both local development and the CI/CD pipeline read and write the same state:
+
+```hcl
+backend "s3" {
+  bucket         = "tfstate-serverless-tasks-api-<account-id>"
+  key            = "serverless-tasks-api/terraform.tfstate"
+  region         = "us-east-1"
+  dynamodb_table = "terraform-locks"
+  encrypt        = true
+}
+```
+
+The S3 bucket and DynamoDB lock table are created once, outside of Terraform, and are not managed by this configuration.
 
 ## Deploy
 
@@ -47,30 +68,30 @@ terraform plan
 terraform apply
 ```
 
-Grab the API endpoint from the output:
+Get the API endpoint:
 
 ```bash
-terraform output api_endpoint
+terraform output -raw api_endpoint
 ```
 
-## Test it
+## Usage
 
 ```bash
 API=$(terraform output -raw api_endpoint)
 
 # Create a task
-curl -X POST "$API/tasks" -d '{"title": "finish DevOps Pro cert"}'
+curl -X POST "$API/tasks" -H "Content-Type: application/json" -d '{"title": "example task"}'
 
 # List tasks
 curl "$API/tasks"
 
-# Get one task (replace <id> with an id from the list above)
+# Get one task
 curl "$API/tasks/<id>"
 
-# Update it
-curl -X PUT "$API/tasks/<id>" -d '{"title": "finish DevOps Pro cert", "done": true}'
+# Update a task
+curl -X PUT "$API/tasks/<id>" -H "Content-Type: application/json" -d '{"title": "example task", "done": true}'
 
-# Delete it
+# Delete a task
 curl -X DELETE "$API/tasks/<id>"
 ```
 
@@ -80,62 +101,65 @@ curl -X DELETE "$API/tasks/<id>"
 terraform destroy
 ```
 
-Confirm in the console afterward that the DynamoDB table, both CloudWatch
-log groups, the Lambda function, and the API Gateway API are gone. DynamoDB
-and CloudWatch Logs are the two resources most likely to be left behind
-silently, so it's worth the extra look.
+This removes the DynamoDB table, both CloudWatch log groups, the Lambda function, the IAM role, and the API Gateway API. It does not touch the S3 state bucket or the DynamoDB lock table, since those aren't managed by this configuration.
 
-## Where to take this next (portfolio-building order)
+## IAM and access
 
-1. **Add authentication** — API Gateway JWT authorizer backed by Cognito,
-   or a simple API key to start. Right now this API is wide open.
-2. **Add input validation** — a JSON schema on the API Gateway route or
-   stricter checks in the handler.
-3. **Add a CI/CD pipeline** — GitHub Actions workflow that runs
-   `terraform fmt -check`, `terraform validate`, `tflint`, and
-   `terraform plan` on PRs, then `terraform apply` on merge to main. This
-   is the piece that turns this from "a Terraform config" into "a
-   DevSecOps pipeline," which is the framing you want for interviews.
-4. **Add a WAF** in front of API Gateway and talk through why (rate
-   limiting, common exploit protection) — good Cloud Security Engineer
-   talking point.
-5. **Move state to S3 + DynamoDB locking** — the commented-out backend
-   block in `main.tf` is ready to uncomment once you've created the
-   bucket and lock table.
-6. **Write a one-page architecture doc** (or reuse this README) for your
-   portfolio repo so a reviewer doesn't have to read Terraform to
-   understand what it does.
+This project does not run under an AWS account's admin credentials. Two scoped identities are used instead:
 
-## CI/CD (GitHub Actions)
+- **Local development**: a dedicated IAM user (`tasks-api-terraform`) with a custom least-privilege policy attached, used via a named AWS CLI profile rather than default credentials.
+- **CI/CD**: an IAM role assumed via GitHub Actions OIDC federation, using the same least-privilege policy. No long-lived AWS access keys are stored in GitHub.
 
-`.github/workflows/terraform.yml` runs on every PR and push to `main`:
+The policy (`terraform-deploy-policy.json`) grants only the specific actions this project's resources require, scoped by resource ARN where AWS permission models allow it (Lambda functions, the DynamoDB table, the IAM role, CloudWatch log groups, the S3 state path). A small number of actions — API Gateway management calls and CloudWatch Logs delivery configuration — cannot be scoped below the account/region level, since AWS does not support resource-level permissions for those specific actions.
 
-- **On PRs**: `terraform fmt -check`, `terraform validate`, `tflint`, and
-  `terraform plan` — so you (or a reviewer) see the plan before merging.
-- **On merge to `main`**: `terraform apply` runs automatically.
+### One-time setup
 
-This uses **OIDC federation** instead of long-lived AWS access keys stored
-in GitHub — the safer, more "I know what I'm doing" pattern for a
-portfolio project. One-time setup before this workflow will run:
+**OIDC provider:**
 
-1. In AWS, create an IAM OIDC identity provider for
-   `token.actions.githubusercontent.com` (Console: IAM → Identity providers
-   → Add provider → OpenID Connect).
-2. Create an IAM role that trusts that provider, scoped to your specific
-   GitHub repo (the trust policy condition should restrict
-   `token.actions.githubusercontent.com:sub` to
-   `repo:YOUR_GITHUB_USERNAME/serverless-tasks-api:*`). Attach a policy
-   granting the permissions Terraform needs (Lambda, API Gateway,
-   DynamoDB, IAM, CloudWatch Logs — broad while you're building, then
-   narrow it down as a follow-up hardening exercise).
-3. In your GitHub repo: Settings → Secrets and variables → Actions → New
-   repository secret → name it `AWS_ROLE_ARN`, value is the ARN of the
-   role from step 2.
-4. If you want the `apply` job to require manual approval before it runs,
-   go to Settings → Environments → New environment → name it `production`
-   → add a required reviewer.
+```bash
+aws iam create-open-id-connect-provider \
+  --url https://token.actions.githubusercontent.com \
+  --client-id-list sts.amazonaws.com \
+  --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
+```
 
-The full walkthrough for all of this is in the companion PDF guide.
+**IAM role for GitHub Actions**, trusted only for this specific repo:
 
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::<account-id>:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+        },
+        "StringLike": {
+          "token.actions.githubusercontent.com:sub": "repo:<github-username>/serverless-tasks-api:*"
+        }
+      }
+    }
+  ]
+}
+```
 
-#I started with broad IAM permissions to get the project working, then iteratively scoped the policy down to only the specific actions and resources this project touches, verifying against real deploy errors rather than guessing.
+Attach `terraform-deploy-policy.json` to that role, then add its ARN as a GitHub repository secret named `AWS_ROLE_ARN` (Settings → Secrets and variables → Actions).
+
+## CI/CD
+
+`.github/workflows/terraform.yml` runs on every pull request and push to `main`:
+
+- **Pull requests**: `terraform fmt -check`, `terraform validate`, `tflint`, and `terraform plan`.
+- **Push to `main`**: `terraform apply`, using the OIDC-federated role described above.
+
+## Possible extensions
+
+- Authentication (API Gateway JWT authorizer via Cognito, or an API key)
+- Request validation via JSON schema
+- WAF in front of API Gateway
+- Splitting the single Lambda handler into per-route functions for finer-grained IAM scoping
